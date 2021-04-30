@@ -310,6 +310,15 @@ class SQLIndexer(object):
               'columns': ',\n'.join(['  `%(name)s` %(type)s' % col for col in columns]),
             }
 
+    elif editor_type == 'impala':
+      sql = '''CREATE TABLE IF NOT EXISTS %(database)s.%(table_name)s_tmp (
+%(columns)s);
+      ''' % {
+                'database': database,
+                'table_name': table_name,
+                'columns': ',\n'.join(['  `%(name)s` string' % col for col in columns]),
+            }                        #Impala does not implicitly cast between string and numeric or Boolean types.
+
     path = urllib_unquote(source['path'])
 
     if path:                                                     # data insertion
@@ -328,6 +337,38 @@ class SQLIndexer(object):
                   'database': database,
                   'table_name': table_name,
                   'csv_rows': csv_rows
+                }
+        if editor_type == 'impala':
+          sql += '''\nINSERT INTO %(database)s.%(table_name)s_tmp VALUES %(csv_rows)s;
+          '''% {
+                  'database': database,
+                  'table_name': table_name,
+                  'csv_rows': csv_rows
+                }
+          sql += '''\nCREATE TABLE IF NOT EXISTS %(database)s.%(table_name)s
+AS SELECT'''% {
+                'database': database,
+                'table_name': table_name,
+              }
+          for count, col in enumerate(columns):
+            if col['type'] == 'boolean':                              # casting from string to boolean is not allowed in impala
+              col['type'] = 'string'
+            sql += '''\n  CAST ( `%(col_name)s` AS %(col_type)s ) `%(col_name)s`'''%{
+              'col_name': col['name'],
+              'col_type': col['type']
+            }
+            if count != len(columns)-1:
+              sql += ','
+          
+          sql += '''\nFROM  %(database)s.%(table_name)s_tmp;
+          '''% {
+                  'database': database,
+                  'table_name': table_name,
+                }
+          sql += '''\nDROP TABLE IF EXISTS %(database)s.%(table_name)s_tmp;
+          '''% {
+                  'database': database,
+                  'table_name': table_name,
                 }
 
     on_success_url = reverse('metastore:describe_table', kwargs={'database': database, 'table': final_table_name}) + \
