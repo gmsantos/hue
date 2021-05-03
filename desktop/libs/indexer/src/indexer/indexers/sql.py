@@ -282,6 +282,17 @@ class SQLIndexer(object):
         is_task=True
     )
 
+  def bool_col_update(self, row, columns):
+    for cnt, col in enumerate(columns):
+      if col['type'] == 'boolean':
+        if row[cnt] in ('T', 't', 'true', 'True', 'TRUE', '1'):
+          row[cnt] = '1'
+        elif row[cnt] in ('F', 'f', 'false', 'False', 'FALSE', '0'):
+          row[cnt] = '0'
+        else:
+          row[cnt] = 'NULL'
+    return row
+
   def create_table_from_local_file(self, source, destination, start_time=-1):
     if '.' in destination['name']:
       database, table_name = destination['name'].split('.', 1)
@@ -317,59 +328,69 @@ class SQLIndexer(object):
                 'database': database,
                 'table_name': table_name,
                 'columns': ',\n'.join(['  `%(name)s` string' % col for col in columns]),
-            }                        #Impala does not implicitly cast between string and numeric or Boolean types.
+            }                                                 # Impala does not implicitly cast between string and numeric or Boolean types.
 
     path = urllib_unquote(source['path'])
 
-    if path:                                                     # data insertion
+    if path:                                                  # data insertion
+
       with open(BASE_DIR + path, 'r') as local_file:
         reader = csv.reader(local_file)
-        list_of_tuples = list(map(tuple, reader))
+        csv_rows = ''
 
-        if source['format']['hasHeader']:
-          list_of_tuples = list_of_tuples[1:]
+        for count, row in enumerate(reader):
+          if source['format']['hasHeader'] and count == 0:
+            continue
+          if editor_type == 'impala':                         # for the boolean col updating csv_val to (1,0)
+            row = self.bool_col_update(row, columns)
+          csv_rows += (str(tuple(row)) + ', ')
 
-        csv_rows = str(list_of_tuples)[1:-1]
+        if csv_rows:
+          csv_rows = csv_rows[:-2]
 
-        if editor_type in ('hive', 'mysql'):
-          sql += '''\nINSERT INTO %(database)s.%(table_name)s VALUES %(csv_rows)s;
-          '''% {
-                  'database': database,
-                  'table_name': table_name,
-                  'csv_rows': csv_rows
-                }
-        if editor_type == 'impala':
-          sql += '''\nINSERT INTO %(database)s.%(table_name)s_tmp VALUES %(csv_rows)s;
-          '''% {
-                  'database': database,
-                  'table_name': table_name,
-                  'csv_rows': csv_rows
-                }
-          sql += '''\nCREATE TABLE IF NOT EXISTS %(database)s.%(table_name)s
+          if editor_type in ('hive', 'mysql'):
+            sql += '''\nINSERT INTO %(database)s.%(table_name)s VALUES %(csv_rows)s;
+            '''% {
+                    'database': database,
+                    'table_name': table_name,
+                    'csv_rows': csv_rows
+                  }
+          elif editor_type == 'impala':
+            sql += '''\nINSERT INTO %(database)s.%(table_name)s_tmp VALUES %(csv_rows)s;
+            '''% {
+                    'database': database,
+                    'table_name': table_name,
+                    'csv_rows': csv_rows
+                  }
+            sql += '''\nCREATE TABLE IF NOT EXISTS %(database)s.%(table_name)s
 AS SELECT'''% {
-                'database': database,
-                'table_name': table_name,
+                  'database': database,
+                  'table_name': table_name,
+                }
+            for count, col in enumerate(columns):
+              if col['type'] == 'boolean':                # casting from string to boolean is not allowed in impala so string -> int -> bool
+                sql += '''\n  CAST ( CAST ( `%(col_name)s` AS TINYINT ) AS  %(col_type)s ) `%(col_name)s`'''%{
+                'col_name': col['name'],
+                'col_type': col['type']
               }
-          for count, col in enumerate(columns):
-            if col['type'] == 'boolean':                              # casting from string to boolean is not allowed in impala
-              col['type'] = 'string'
-            sql += '''\n  CAST ( `%(col_name)s` AS %(col_type)s ) `%(col_name)s`'''%{
-              'col_name': col['name'],
-              'col_type': col['type']
-            }
-            if count != len(columns)-1:
-              sql += ','
+              else:
+                sql += '''\n  CAST ( `%(col_name)s` AS %(col_type)s ) `%(col_name)s`'''%{
+                  'col_name': col['name'],
+                  'col_type': col['type']
+                }
+              if count != len(columns)-1:
+                sql += ','
           
-          sql += '''\nFROM  %(database)s.%(table_name)s_tmp;
-          '''% {
-                  'database': database,
-                  'table_name': table_name,
-                }
-          sql += '''\nDROP TABLE IF EXISTS %(database)s.%(table_name)s_tmp;
-          '''% {
-                  'database': database,
-                  'table_name': table_name,
-                }
+            sql += '''\nFROM  %(database)s.%(table_name)s_tmp;
+            '''% {
+                    'database': database,
+                    'table_name': table_name,
+                  }
+            sql += '''\nDROP TABLE IF EXISTS %(database)s.%(table_name)s_tmp;
+            '''% {
+                    'database': database,
+                    'table_name': table_name,
+                  }
 
     on_success_url = reverse('metastore:describe_table', kwargs={'database': database, 'table': final_table_name}) + \
         '?source_type=' + source_type
